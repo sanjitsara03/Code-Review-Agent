@@ -8,10 +8,8 @@ build/
 venv/
 env/
 docs/
-src/code_review_agent/github_client.py
-src/code_review_agent/config.py
 .env
-
+tests/
 .pytest_cache/
 .ruff_cache/
 .coverage
