@@ -1,10 +1,91 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
-Description: Code Review Agent — Stage 3 sandbox execution infrastructure
+Description: Code Review Agent
+
+Globals:
+  Function:
+    Runtime: python3.11
+    Timeout: 900        # 15 minutes — max Lambda timeout, agent loop can take 2-3 min
+    MemorySize: 512
+    Environment:
+      Variables:
+        AWS_ACCOUNT_ID: !Ref AWS::AccountId
+        SECRETS_NAME: code-review-agent/secrets
+        CODEBUILD_PROJECT: code-review-sandbox
+        CODEBUILD_LOG_GROUP: /code-review/sandbox
 
 Resources:
 
-  # ── IAM Role for CodeBuild ──────────────────────────────────────────────────
+  # Secrets Manager
+  AgentSecrets:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: code-review-agent/secrets
+      Description: Runtime credentials for the code review agent
+      SecretString: |
+        {
+          "anthropic_api_key": "REPLACE_ME",
+          "github_token": "REPLACE_ME",
+          "webhook_secret": "REPLACE_ME"
+        }
+
+  # IAM role for Lambda
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: code-review-lambda-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: LambdaPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Read secrets
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref AgentSecrets
+              # Trigger CodeBuild and read results
+              - Effect: Allow
+                Action:
+                  - codebuild:StartBuild
+                  - codebuild:BatchGetBuilds
+                Resource: !GetAtt SandboxProject.Arn
+              # Read CodeBuild logs from CloudWatch
+              - Effect: Allow
+                Action: logs:GetLogEvents
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/code-review/sandbox:*'
+
+  # Lambda function
+  ReviewFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: code-review-agent
+      CodeUri: ../src/
+      Handler: code_review_agent.handler.lambda_handler
+      Role: !GetAtt LambdaRole.Arn
+      Events:
+        Webhook:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref WebhookApi
+            Path: /webhook
+            Method: POST
+
+  # API Gateway HTTP API
+  WebhookApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: prod
+
+  # IAM role for CodeBuild
   SandboxCodeBuildRole:
     Type: AWS::IAM::Role
     Properties:
@@ -21,7 +102,6 @@ Resources:
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              # Write logs to CloudWatch
               - Effect: Allow
                 Action:
                   - logs:CreateLogGroup
@@ -29,31 +109,27 @@ Resources:
                   - logs:PutLogEvents
                 Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/code-review/sandbox*'
 
-  # ── CloudWatch Log Group ─────────────────────────────────────────────────────
+  # CloudWatch log group for CodeBuild output
   SandboxLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: /code-review/sandbox
-      RetentionInDays: 7  # Keep build logs for 1 week — no need for longer
+      RetentionInDays: 7
 
-  # ── CodeBuild Project ────────────────────────────────────────────────────────
+  # CodeBuild project
   SandboxProject:
     Type: AWS::CodeBuild::Project
     Properties:
       Name: code-review-sandbox
       Description: Sandboxed test and lint execution for the code review agent
       ServiceRole: !GetAtt SandboxCodeBuildRole.Arn
-
-      # No artifacts — we read output directly from CloudWatch Logs
       Artifacts:
         Type: NO_ARTIFACTS
-
       Environment:
         Type: LINUX_CONTAINER
-        ComputeType: BUILD_GENERAL1_SMALL  # 3 GB RAM, 2 vCPU — plenty for tests
-        Image: aws/codebuild/standard:7.0   # Python 3.11 available
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:7.0
         EnvironmentVariables:
-          # Defaults — overridden per-build via environmentVariablesOverride
           - Name: TOOL
             Value: pytest
           - Name: REPO_URL
@@ -64,7 +140,6 @@ Resources:
             Value: ''
           - Name: TARGET_PATH
             Value: ''
-
       Source:
         Type: NO_SOURCE
         BuildSpec: |
@@ -74,21 +149,15 @@ Resources:
               runtime-versions:
                 python: "3.11"
               commands:
-                # Install uv for fast dependency installation
                 - pip install uv --quiet 2>/dev/null || true
-
             pre_build:
               commands:
-                # Clone the PR branch specifically so the head SHA is present in the
-                # shallow history. --depth=1 on the default branch would miss PR branch commits.
                 - git clone --depth=1 --branch "$HEAD_BRANCH" "$REPO_URL" /tmp/repo
                 - git -C /tmp/repo checkout "$HEAD_SHA"
-                # Install dependencies: try uv first, fall back to pip
                 - |
                   cd /tmp/repo
                   if [ -f pyproject.toml ] && command -v uv >/dev/null 2>&1; then
                     uv sync --dev --quiet 2>/dev/null || true
-                    # Make sure pytest and ruff are always available
                     uv pip install pytest ruff --quiet 2>/dev/null || true
                   elif [ -f requirements.txt ]; then
                     pip install -r requirements.txt --quiet 2>/dev/null || true
@@ -96,7 +165,6 @@ Resources:
                   else
                     pip install pytest ruff --quiet
                   fi
-
             build:
               commands:
                 - |
@@ -111,21 +179,21 @@ Resources:
                     echo "ERROR: Unknown TOOL='$TOOL'. Expected 'pytest' or 'ruff'."
                     exit 1
                   fi
-
       LogsConfig:
         CloudWatchLogs:
           Status: ENABLED
           GroupName: /code-review/sandbox
-          # StreamName omitted — CodeBuild auto-generates one per build
-
-      # Builds should complete well within 10 minutes
       TimeoutInMinutes: 10
 
 Outputs:
-  SandboxProjectName:
-    Description: CodeBuild project name to set in CODEBUILD_PROJECT env var
-    Value: !Ref SandboxProject
+  WebhookUrl:
+    Description: Paste this URL into your GitHub webhook settings
+    Value: !Sub 'https://${WebhookApi}.execute-api.${AWS::Region}.amazonaws.com/prod/webhook'
 
-  SandboxLogGroup:
-    Description: CloudWatch Log Group where build output is stored
-    Value: !Ref SandboxLogGroup
+  ReviewFunctionArn:
+    Description: Lambda function ARN
+    Value: !GetAtt ReviewFunction.Arn
+
+  SandboxProjectName:
+    Description: CodeBuild project name
+    Value: !Ref SandboxProject

@@ -86,38 +86,27 @@ def _parse_pr_ref(pr_ref: str) -> tuple[str, str, int]:
     return owner, repo, pr_number
 
 
-def _clone_github_repo(clone_url: str, head_sha: str, temp_dir: str) -> str:
+def _clone_github_repo(clone_url: str, head_branch: str, head_sha: str, temp_dir: str) -> str:
     """Clone a GitHub repo and check out to the PR's head commit.
 
     Args:
         clone_url: Git clone URL (https:// or git://)
-        head_sha: Commit SHA to check out
+        head_branch: Branch name to clone (e.g. "feature/my-branch")
+        head_sha: Commit SHA to check out after cloning
         temp_dir: Temporary directory to clone into
 
     Returns:
         Path to cloned repo
 
     Raises:
-        subprocess.CalledProcessError: If clone or checkout fails.
+        RuntimeError: If clone or checkout fails.
     """
     try:
-        # Sparse checkout: skip large binary dirs (data/, model_output/, etc.)
         subprocess.run(
-            ["git", "clone", "--depth=1", "--filter=blob:limit=500k",
-             "--sparse", clone_url, temp_dir],
+            ["git", "clone", "--depth=1", "--branch", head_branch, clone_url, temp_dir],
             check=True,
             capture_output=True,
             timeout=120,
-        )
-        # Enable sparse checkout patterns — include code, exclude large asset dirs
-        subprocess.run(
-            ["git", "-C", temp_dir, "sparse-checkout", "set",
-             "--no-cone", "*.py", "*.toml", "*.txt", "*.md", "*.json", "*.yaml", "*.yml",
-             ":(exclude)data/", ":(exclude)model_output/", ":(exclude)eval_output/",
-             ":(exclude)checkpoints/", ":(exclude)sample_docs/"],
-            check=True,
-            capture_output=True,
-            timeout=60,
         )
         subprocess.run(
             ["git", "-C", temp_dir, "checkout", head_sha],
@@ -172,8 +161,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--aws-region",
-        default="us-east-1",
-        help="AWS region for CodeBuild sandbox (default: us-east-1)",
+        default="us-east-2",
+        help="AWS region for CodeBuild sandbox (default: us-east-2)",
     )
 
     args = parser.parse_args()
@@ -204,7 +193,7 @@ def main() -> None:
         temp_dir = tempfile.mkdtemp(prefix="code-review-")
         print(f"Cloning {metadata.repo_url} to {temp_dir}...")
         try:
-            repo_path = _clone_github_repo(metadata.repo_url, metadata.head_sha, temp_dir)
+            repo_path = _clone_github_repo(metadata.repo_url, metadata.head_branch, metadata.head_sha, temp_dir)
         except RuntimeError as e:
             print(f"ERROR: {e}", file=sys.stderr)
             shutil.rmtree(temp_dir, ignore_errors=True)
@@ -225,6 +214,9 @@ def main() -> None:
         )
 
         print_review(result)
+
+        if not args.post:
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
         # Post review back to GitHub if requested
         if args.post:

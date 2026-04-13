@@ -15,6 +15,10 @@ tests/
 .coverage
 htmlcov/
 
+# SAM build artifacts
+.aws-sam/
+samconfig.toml
+
 # macOS
 .DS_Store
 .idea/
