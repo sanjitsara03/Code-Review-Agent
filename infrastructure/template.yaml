@@ -13,6 +13,7 @@ Globals:
         SECRETS_NAME: code-review-agent/secrets
         CODEBUILD_PROJECT: code-review-sandbox
         CODEBUILD_LOG_GROUP: /code-review/sandbox
+        DYNAMODB_TABLE: code-review-history
 
 Resources:
 
@@ -62,6 +63,13 @@ Resources:
               - Effect: Allow
                 Action: logs:GetLogEvents
                 Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/code-review/sandbox:*'
+              # Write review records to DynamoDB
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                Resource: !GetAtt ReviewHistoryTable.Arn
 
   # Lambda function
   ReviewFunction:
@@ -184,6 +192,23 @@ Resources:
           Status: ENABLED
           GroupName: /code-review/sandbox
       TimeoutInMinutes: 10
+
+  # DynamoDB table for review history
+  ReviewHistoryTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: code-review-history
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pr_id
+          AttributeType: S
+        - AttributeName: reviewed_at
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pr_id
+          KeyType: HASH
+        - AttributeName: reviewed_at
+          KeyType: RANGE
 
 Outputs:
   WebhookUrl:

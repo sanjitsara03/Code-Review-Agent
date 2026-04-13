@@ -27,6 +27,7 @@ import httpx
 from code_review_agent.agent import run_review
 from code_review_agent.github_client import GitHubClient
 from code_review_agent.secrets import load_secrets
+from code_review_agent.store import save_review
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -34,17 +35,8 @@ logger.setLevel(logging.INFO)
 # PR actions that should trigger a review
 REVIEW_ACTIONS = {"opened", "reopened", "synchronize"}
 
-
+#AWS Lambda entry point.
 def lambda_handler(event: dict, context) -> dict:
-    """AWS Lambda entry point.
-
-    Args:
-        event: API Gateway proxy event containing headers and body.
-        context: Lambda context object (unused).
-
-    Returns:
-        API Gateway response dict with statusCode and body.
-    """
     # Parse request
     headers = {k.lower(): v for k, v in (event.get("headers") or {}).items()}
     body_raw = event.get("body") or ""
@@ -112,6 +104,7 @@ def lambda_handler(event: dict, context) -> dict:
     # Run agent loop
     thread_id = f"lambda-{owner}-{repo}-{pr_number}-{head_sha[:8]}"
     aws_region = os.getenv("AWS_REGION", "us-east-2")
+    start_time = __import__("time").time()
 
     try:
         result = run_review(
@@ -152,22 +145,26 @@ def lambda_handler(event: dict, context) -> dict:
         logger.error("Failed to post review: %s", e)
         return _response(500, f"Failed to post review: {e}")
 
+    # Save review record to DynamoDB
+    try:
+        save_review(
+            owner=owner,
+            repo=repo,
+            pr_number=pr_number,
+            head_sha=head_sha,
+            status=result["final_status"] or "comment",
+            comment_count=len(result.get("review_comments", [])),
+            duration_ms=int(((__import__("time").time()) - start_time) * 1000),
+            region=aws_region,
+        )
+    except Exception as e:
+        logger.warning("Failed to save review record: %s", e)
+
     return _response(200, f"Review posted: {review_url}")
 
-
+#Download a GitHub repo tarball and extract it into dest_dir.
 def _download_github_repo(owner: str, repo: str, head_sha: str, token: str, dest_dir: str) -> None:
-    """Download a GitHub repo tarball and extract it into dest_dir.
-
-    Args:
-        owner: Repository owner.
-        repo: Repository name.
-        head_sha: Commit SHA to download.
-        token: GitHub personal access token.
-        dest_dir: Directory to extract contents into.
-
-    Raises:
-        RuntimeError: If download or extraction fails.
-    """
+    
     url = f"https://api.github.com/repos/{owner}/{repo}/tarball/{head_sha}"
     try:
         with httpx.Client(follow_redirects=True, timeout=120) as client:
@@ -204,14 +201,6 @@ def _verify_signature(body: str, signature_header: str, secret: str) -> bool:
     the result in the X-Hub-Signature-256 header as "sha256=<hex>".
     We recompute it and compare with hmac.compare_digest to prevent
     timing attacks.
-
-    Args:
-        body: Raw request body string.
-        signature_header: Value of X-Hub-Signature-256 header.
-        secret: Webhook secret configured in GitHub and Secrets Manager.
-
-    Returns:
-        True if signature is valid, False otherwise.
     """
     if not signature_header.startswith("sha256="):
         return False
@@ -225,9 +214,9 @@ def _verify_signature(body: str, signature_header: str, secret: str) -> bool:
     actual = signature_header.removeprefix("sha256=")
     return hmac.compare_digest(expected, actual)
 
-
+#Build an API Gateway proxy response.
 def _response(status_code: int, message: str) -> dict:
-    """Build an API Gateway proxy response."""
+    
     return {
         "statusCode": status_code,
         "headers": {"Content-Type": "application/json"},
