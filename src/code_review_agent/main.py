@@ -162,6 +162,19 @@ def main() -> None:
         action="store_true",
         help="Post review back to GitHub (GitHub mode only)",
     )
+    parser.add_argument(
+        "--sandbox",
+        action="store_true",
+        help=(
+            "Run tests and linter in AWS CodeBuild instead of locally. "
+            "Requires AWS credentials and infrastructure/template.yaml to be deployed."
+        ),
+    )
+    parser.add_argument(
+        "--aws-region",
+        default="us-east-1",
+        help="AWS region for CodeBuild sandbox (default: us-east-1)",
+    )
 
     args = parser.parse_args()
 
@@ -204,6 +217,11 @@ def main() -> None:
             repo_path=repo_path,
             diff_content=diff_content,
             thread_id=thread_id,
+            repo_url=metadata.repo_url,
+            head_branch=metadata.head_branch,
+            head_sha=metadata.head_sha,
+            sandbox_mode=args.sandbox,
+            aws_region=args.aws_region,
         )
 
         print_review(result)
@@ -257,6 +275,8 @@ def main() -> None:
             repo_path=repo_path,
             diff_content=diff_content,
             thread_id=thread_id,
+            sandbox_mode=args.sandbox,
+            aws_region=args.aws_region,
         )
 
         print_review(result)

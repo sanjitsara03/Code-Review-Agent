@@ -7,8 +7,10 @@ from code_review_agent.tools import ALL_TOOLS, ReviewState
 # Haiku for tool-calling steps — fast and cheap (see CLAUDE.md cost controls)
 MODEL = "claude-haiku-4-5-20251001"
 
-# Hard cap: 25 tool calls per review (see CLAUDE.md cost controls)
-RECURSION_LIMIT = 25
+# Hard cap: 25 tool-call rounds per review (see CLAUDE.md cost controls).
+# LangGraph counts each LLM step + tools step as 2 recursion steps,
+# so set to 50 to allow up to ~25 actual tool-call rounds.
+RECURSION_LIMIT = 50
 
 SYSTEM_PROMPT = """You are an expert code reviewer. Your job is to produce a thorough, \
 actionable review of a pull request.
@@ -50,13 +52,29 @@ def build_graph():
     return graph
 
 
-def run_review(repo_path: str, diff_content: str, thread_id: str) -> dict:
+def run_review(
+    repo_path: str,
+    diff_content: str,
+    thread_id: str,
+    repo_url: str | None = None,
+    head_branch: str | None = None,
+    head_sha: str | None = None,
+    sandbox_mode: bool = False,
+    aws_region: str = "us-east-1",
+) -> dict:
     """Run a full code review and return the final state.
 
     Args:
         repo_path: Absolute path to the locally cloned repository.
         diff_content: Unified diff string of the PR changes.
         thread_id: Unique ID for this review run (used by checkpointer).
+        repo_url: HTTPS clone URL — required when sandbox_mode=True.
+        head_branch: PR head branch name — required when sandbox_mode=True.
+        head_sha: PR head commit SHA — required when sandbox_mode=True.
+        sandbox_mode: If True, run_tests/run_linter execute in CodeBuild
+                      instead of local subprocess. Requires AWS credentials
+                      and the infrastructure stack to be deployed.
+        aws_region: AWS region for CodeBuild (sandbox_mode only).
 
     Returns:
         dict with keys: final_status, final_comment, review_comments.
@@ -75,6 +93,11 @@ def run_review(repo_path: str, diff_content: str, thread_id: str) -> dict:
             "thread_id": thread_id,
             "repo_path": repo_path,
             "diff_content": diff_content,
+            "sandbox_mode": sandbox_mode,
+            "repo_url": repo_url,
+            "head_branch": head_branch,
+            "head_sha": head_sha,
+            "aws_region": aws_region,
         },
         "recursion_limit": RECURSION_LIMIT,
     }
